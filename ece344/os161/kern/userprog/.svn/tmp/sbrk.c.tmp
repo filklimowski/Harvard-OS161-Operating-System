@@ -1,0 +1,57 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <kern/unistd.h>
+#include <machine/spl.h>
+#include <test.h>
+#include <addrspace.h>
+#include <trapframe.h>
+#include <synch.h>
+#include <scheduler.h>
+#include <dev.h>
+#include <vfs.h>
+#include <vm.h>
+#include <syscall.h>
+#include <version.h>
+#include <hello.h>
+#include <lib.h>
+#include <curthread.h>
+#include <thread.h>
+#include <sbrk.h>
+
+/*
+*	This function needs to incrememnt the heap by change.
+* 	It will then return the old heap value.
+*/
+void *sys_sbrk(int change, int *retval){
+
+	if (curthread->t_vmspace->heaptop + change < curthread->t_vmspace->heapbottom){
+		*retval = EINVAL;
+		return (void *) -1; // Going under allocated memory
+	}
+<<<<<<< .mine
+	/*if (curthread->t_vmspace->heaptop + change - curthread->t_vmspace->heapbottom > USER_HEAP_LIMIT){
+		*retval = ENOMEM;
+		return (void *) -1; // Want to allocate too much memory
+	}*/
+=======
+	//if (curthread->t_vmspace->heaptop + change - curthread->t_vmspace->heapbottom > USER_HEAP_LIMIT){
+		//*retval = ENOMEM;
+		//return (void *) -1; // Want to allocate too much memory
+	//}
+>>>>>>> .r151
+
+	if (change == 0)
+		return (void *)curthread->t_vmspace->heapbottom;
+
+	int new_hpos = curthread->t_vmspace->heaptop + change;
+	int old_hpos = curthread->t_vmspace->heaptop;
+
+	if (new_hpos + new_hpos % 4 > curthread->t_vmspace->as_stackvbase){
+		*retval = ENOMEM;
+		return (void *) -1; // Want to allocate too much memory
+	}
+	curthread->t_vmspace->heaptop = new_hpos + new_hpos % 4;
+
+	return (void *)old_hpos;
+
+}

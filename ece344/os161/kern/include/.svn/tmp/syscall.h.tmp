@@ -1,0 +1,17 @@
+#ifndef _SYSCALL_H_
+#define _SYSCALL_H_
+
+/*
+ * Prototypes for IN-KERNEL entry points for system call implementations.
+ */
+
+int sys_reboot(int code);
+
+int sys_printchar(char word);
+
+int sys_readchar();
+
+pid_t sys_fork(struct trapframe *parent_tf);
+
+
+#endif /* _SYSCALL_H_ */

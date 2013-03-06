@@ -1,0 +1,797 @@
+/* 
+ * stoplight.c
+ *
+ * 31-1-2003 : GWA : Stub functions created for CS161 Asst1.
+ *
+ * NB: You can use any synchronization primitives available to solve
+ * the stoplight problem in this file.
+ */
+
+
+/*
+ * 
+ * Includes
+ *
+ */
+
+#include <types.h>
+#include <lib.h>
+#include <test.h>
+#include <thread.h>
+#include <synch.h>
+
+
+/*
+ *
+ * Constants
+ *
+ */
+
+/*
+ * Number of cars created.
+ */
+
+#define NCARS 20
+#define SQUARELOCKED 1
+#define SQUAREUNLOCKED 0
+#define N 0
+#define E 1
+#define S 2
+#define W 3
+
+static struct semaphore *tsem = NULL;
+
+struct cv *cvapproach_N;
+struct cv *cvapproach_E;
+struct cv *cvapproach_W;
+struct cv *cvapproach_S;
+
+struct cv *cvsquareNW;
+struct cv *cvsquareNE;
+struct cv *cvsquareSW;
+struct cv *cvsquareSE;
+
+struct lock *lock_NW;
+struct lock *lock_NE;
+struct lock *lock_SW;
+struct lock *lock_SE;
+
+struct lock *approach_N;
+struct lock *approach_E;
+struct lock *approach_W;
+struct lock *approach_S;
+
+struct directionsquare *square1;
+struct directionsquare *square2;
+struct directionsquare *square3;
+struct directionsquare *square4;
+
+struct directionsquare *appN;
+struct directionsquare *appE;
+struct directionsquare *appS;
+struct directionsquare *appW;
+
+/*
+ *
+ * Function Definitions
+ *
+ */
+
+static const char *directions[] = { "N", "E", "S", "W" };
+
+static const char *msgs[] = {
+        "approaching:",
+        "region1:    ",
+        "region2:    ",
+        "region3:    ",
+        "leaving:    "
+};
+
+struct directionsquare
+{
+	int squarenumber;
+	int islocked;
+};
+
+struct directionsquare *
+directionsquare_create (int squarenumber){
+	struct directionsquare *new_directionsquare;
+	new_directionsquare = kmalloc(sizeof(struct directionsquare));
+
+	if (new_directionsquare == NULL) {
+		return NULL;
+	}
+
+	new_directionsquare->squarenumber = squarenumber;
+	new_directionsquare->islocked = SQUAREUNLOCKED;
+	return new_directionsquare;
+}
+
+/* use these constants for the first parameter of message */
+enum { APPROACHING, REGION1, REGION2, REGION3, LEAVING };
+
+enum { STRAIGHT, LEFT, RIGHT };
+
+static void
+message(int msg_nr, int carnumber, int cardirection, int destdirection)
+{
+        kprintf("%s car = %2d, direction = %s, destination = %s\n",
+                msgs[msg_nr], carnumber,
+                directions[cardirection], directions[destdirection]);
+}
+ 
+/*
+ * gostraight()
+ *
+ * Arguments:
+ *      unsigned long cardirection: the direction from which the car
+ *              approaches the intersection.
+ *      unsigned long carnumber: the car id number for printing purposes.
+ *
+ * Returns:
+ *      nothing.
+ *
+ * Notes:
+ *      This function should implement passing straight through the
+ *      intersection from any direction.
+ *      Write and comment this function.
+ */
+
+static
+void
+gostraight(unsigned long cardirection,
+           unsigned long carnumber)
+{
+
+	if (cardirection == N){
+		//message(APPROACHING, carnumber, cardirection, S);
+		while (square1->islocked == SQUARELOCKED || square3->islocked == SQUARELOCKED) {
+			if (square1->islocked == SQUARELOCKED){ //square 1 is locked
+				cv_signal(cvsquareSW, lock_SW);
+				lock_release(lock_SW);
+				cv_wait(cvsquareNW, lock_NW);
+			}
+			if (square3->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareNW, lock_NW);
+				lock_release(lock_NW);
+				cv_wait(cvsquareSW, lock_SW);
+			}
+		}	
+		lock_acquire(lock_NW);	
+		lock_acquire(lock_SW);
+		square1->islocked = SQUARELOCKED;
+		square3->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, S);
+		appN->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_N, approach_N);
+		message(REGION2, carnumber, cardirection, S);
+		square1->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNW, lock_NW);
+		lock_release(lock_NW);
+		cv_signal(cvsquareNW, lock_NW);
+
+		message(LEAVING, carnumber, cardirection, S);
+		square3->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareSW, lock_SW);
+		lock_release(lock_SW);
+		cv_signal(cvsquareSW, lock_SW);
+	}
+	
+	else if (cardirection == E){
+		//message(APPROACHING, carnumber, cardirection, W);
+		while (square2->islocked == SQUARELOCKED || square1->islocked == SQUARELOCKED) {
+			if (square2->islocked == SQUARELOCKED){ 
+				cv_signal(cvsquareNW, lock_NW);
+				lock_release(lock_NW);		
+				cv_wait(cvsquareNE, lock_NE);
+			}
+			if (square1->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareNE, lock_NE);
+				lock_release(lock_NE);
+				cv_wait(cvsquareNW, lock_NW);
+			}
+		}	
+		lock_acquire(lock_NE);
+		lock_acquire(lock_NW);;
+		square2->islocked = SQUARELOCKED;
+		square1->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, W);
+		appE->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_E, approach_E);
+		message(REGION2, carnumber, cardirection, W);
+		square2->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNE, lock_NE);
+		lock_release(lock_NE);
+		cv_signal(cvsquareNE, lock_NE);
+		message(LEAVING, carnumber, cardirection, W);
+		square1->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareNW, lock_NW);
+		lock_release(lock_NW);
+		cv_signal(cvsquareNW, lock_NW);
+	}
+
+	else if (cardirection == W){
+		//message(APPROACHING, carnumber, cardirection, E);
+		while (square3->islocked == SQUARELOCKED || square4->islocked == SQUARELOCKED) {
+			if (square3->islocked == SQUARELOCKED){ 
+				cv_signal(cvsquareSE, lock_SE);
+				lock_release(lock_SE);		
+				cv_wait(cvsquareSW, lock_SW);
+			}
+			if (square4->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareSW, lock_SW);
+				lock_release(lock_SW);
+				cv_wait(cvsquareSE, lock_SE);
+			}
+		}	
+		lock_acquire(lock_SW);
+		lock_acquire(lock_SE);
+		square3->islocked = SQUARELOCKED;
+		square4->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, E);
+		appW->islocked = SQUAREUNLOCKED;		
+		cv_signal(cvapproach_W, approach_W);
+		lock_release(approach_W);
+		message(REGION2, carnumber, cardirection, E);
+		square3->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSW, lock_SW);
+		lock_release(lock_SW);
+		message(LEAVING, carnumber, cardirection, E);
+		square4->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareSE, lock_SE);
+		lock_release(lock_SE);
+	}
+	
+	else if (cardirection == S){
+		//message(APPROACHING, carnumber, cardirection, N);
+		while (square4->islocked == SQUARELOCKED || square2->islocked == SQUARELOCKED) {
+			if (square4->islocked == SQUARELOCKED){ 
+				cv_signal(cvsquareNE, lock_NE);
+				lock_release(lock_NE);		
+				cv_wait(cvsquareSE, lock_SE);
+			}
+			if (square2->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareSE, lock_SE);
+				lock_release(lock_SE);
+				cv_wait(cvsquareNE, lock_NE);
+			}
+		}	
+		lock_acquire(lock_SE);
+		lock_acquire(lock_NE);;
+		square4->islocked = SQUARELOCKED;
+		square2->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, N);
+		appS->islocked = SQUAREUNLOCKED;		
+		cv_signal(cvapproach_S, approach_S);
+		lock_release(approach_S);
+		message(REGION2, carnumber, cardirection, N);
+		square4->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSE, lock_SE);
+		lock_release(lock_SE);
+		message(LEAVING, carnumber, cardirection, N);
+		square2->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareNE, lock_NE);
+		lock_release(lock_NE);
+	}
+
+}
+
+
+/*
+ * turnleft()
+ *
+ * Arguments:
+ *      unsigned long cardirection: the direction from which the car
+ *              approaches the intersection.
+ *      unsigned long carnumber: the car id number for printing purposes.
+ *
+ * Returns:
+ *      nothing.
+ *
+ * Notes:
+ *      This function should implement making a left turn through the 
+ *      intersection from any direction.
+ *      Write and comment this function.
+ */
+
+static
+void
+turnleft(unsigned long cardirection,
+         unsigned long carnumber)
+{
+        
+	if (cardirection == N){
+		//message(APPROACHING, carnumber, cardirection, E);
+		while (square1->islocked == SQUARELOCKED || square3->islocked == SQUARELOCKED) {
+			if (square1->islocked == SQUARELOCKED){ //square 1 is locked
+				cv_signal(cvsquareSW, lock_SW);
+				lock_release(lock_SW);
+				cv_wait(cvsquareNW, lock_NW);
+			}
+			if (square3->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareNW, lock_NW);
+				lock_release(lock_NW);
+				cv_wait(cvsquareSW, lock_SW);
+			}
+		}	
+		lock_acquire(lock_NW);	
+		lock_acquire(lock_SW);
+		square1->islocked = SQUARELOCKED;
+		square3->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, E);
+		appN->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_N, approach_N);
+		lock_release(approach_N);
+		message(REGION2, carnumber, cardirection, E);
+		square1->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNW, lock_NW);
+		lock_release(lock_NW);
+
+		while (square4->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareSE, lock_SE);		
+		}
+
+		lock_acquire(lock_SE);
+		
+		square4->islocked = SQUARELOCKED;
+		message(REGION3, carnumber, cardirection, E);
+		square3->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSW, lock_SW);
+		lock_release(lock_SW);
+		message(LEAVING, carnumber, cardirection, E);
+		square4->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareSE, lock_SE);
+		lock_release(lock_SE);
+	}
+	
+	else if (cardirection == E){
+		//message(APPROACHING, carnumber, cardirection, S);
+		while (square2->islocked == SQUARELOCKED || square1->islocked == SQUARELOCKED) {
+			if (square2->islocked == SQUARELOCKED){ 
+				cv_signal(cvsquareNW, lock_NW);
+				lock_release(lock_NW);		
+				cv_wait(cvsquareNE, lock_NE);
+			}
+			if (square1->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareNE, lock_NE);
+				lock_release(lock_NE);
+				cv_wait(cvsquareNW, lock_NW);
+			}
+		}	
+		lock_acquire(lock_NE);
+		lock_acquire(lock_NW);;
+		square2->islocked = SQUARELOCKED;
+		square1->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, S);
+		appE->islocked = SQUAREUNLOCKED;		
+		cv_signal(cvapproach_E, approach_E);
+		lock_release(approach_E);
+		message(REGION2, carnumber, cardirection, S);
+		square2->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNE, lock_NE);
+		lock_release(lock_NE);
+
+		while (square3->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareSW, lock_SW);		
+		}
+
+		lock_acquire(lock_SW);
+		
+		square3->islocked = SQUARELOCKED;
+		message(REGION3, carnumber, cardirection, S);
+		square1->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNW, lock_NW);
+		lock_release(lock_NW);
+
+		message(LEAVING, carnumber, cardirection, S);
+		square3->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareSW, lock_SW);
+		lock_release(lock_SW);
+	}
+
+	else if (cardirection == W){
+		//message(APPROACHING, carnumber, cardirection, N);
+		while (square3->islocked == SQUARELOCKED || square4->islocked == SQUARELOCKED) {
+			if (square3->islocked == SQUARELOCKED){ 
+				cv_signal(cvsquareSE, lock_SE);
+				lock_release(lock_SE);		
+				cv_wait(cvsquareSW, lock_SW);
+			}
+			if (square4->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareSW, lock_SW);
+				lock_release(lock_SW);
+				cv_wait(cvsquareSE, lock_SE);
+			}
+		}	
+		lock_acquire(lock_SW);
+		lock_acquire(lock_SE);
+		square3->islocked = SQUARELOCKED;
+		square4->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, N);
+		appW->islocked = SQUAREUNLOCKED;		
+		cv_signal(cvapproach_W, approach_W);
+		lock_release(approach_W);
+		message(REGION2, carnumber, cardirection, N);
+		square3->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSW, lock_SW);
+		lock_release(lock_SW);
+
+		while (square2->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareNE, lock_NE);		
+		}
+
+		lock_acquire(lock_NE);
+		
+		square2->islocked = SQUARELOCKED;
+		message(REGION3, carnumber, cardirection, N);
+		square4->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSE, lock_SE);
+		lock_release(lock_SE);
+
+
+		message(LEAVING, carnumber, cardirection, N);
+		square2->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareNE, lock_NE);
+		lock_release(lock_NE);
+	}
+	
+	else if (cardirection == S){
+		//message(APPROACHING, carnumber, cardirection, W);
+		while (square4->islocked == SQUARELOCKED || square2->islocked == SQUARELOCKED) {
+			if (square4->islocked == SQUARELOCKED){ 
+				cv_signal(cvsquareNE, lock_NE);
+				lock_release(lock_NE);		
+				cv_wait(cvsquareSE, lock_SE);
+			}
+			if (square2->islocked == SQUARELOCKED) {
+				cv_signal(cvsquareSE, lock_SE);
+				lock_release(lock_SE);
+				cv_wait(cvsquareNE, lock_NE);
+			}
+		}	
+		lock_acquire(lock_SE);
+		lock_acquire(lock_NE);;
+		square4->islocked = SQUARELOCKED;
+		square2->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, W);
+		appS->islocked = SQUAREUNLOCKED;		
+		cv_signal(cvapproach_S, approach_S);
+		lock_release(approach_S);
+		message(REGION2, carnumber, cardirection, W);
+		square4->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSE, lock_SE);
+		lock_release(lock_SE);
+
+		while (square1->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareNW, lock_NW);		
+		}
+
+		lock_acquire(lock_NW);
+		
+		square1->islocked = SQUARELOCKED;
+		message(REGION3, carnumber, cardirection, W);
+		square2->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNE, lock_NE);
+		lock_release(lock_NE);
+
+		message(LEAVING, carnumber, cardirection, W);
+		square1->islocked =SQUAREUNLOCKED;
+		cv_signal(cvsquareNW, lock_NW);
+		lock_release(lock_NW);
+	}
+}
+
+
+/*
+ * turnright()
+ *
+ * Arguments:
+ *      unsigned long cardirection: the direction from which the car
+ *              approaches the intersection.
+ *      unsigned long carnumber: the car id number for printing purposes.
+ *
+ * Returns:
+ *      nothing.
+ *
+ * Notes:
+ *      This function should implement making a right turn through the 
+ *      intersection from any direction.
+ *      Write and comment this function.
+ */
+
+static
+void
+turnright(unsigned long cardirection,
+          unsigned long carnumber)
+{
+	if (cardirection == N){
+		//message(APPROACHING, carnumber, cardirection, W);
+		while (square1->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareNW, lock_NW);		
+		}
+
+		lock_acquire(lock_NW);
+		
+		square1->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, W);
+		appN->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_N, approach_N);
+		lock_release(approach_N);
+		message(LEAVING, carnumber, cardirection, W);
+		square1->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNW, lock_NW);
+		lock_release(lock_NW);
+	}
+	
+	else if (cardirection == E){
+		//message(APPROACHING, carnumber, cardirection, N);
+		while (square2->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareNE, lock_NE);		
+		}
+
+		lock_acquire(lock_NE);
+
+		square2->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, N);
+		appE->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_E, approach_E);
+		lock_release(approach_E);
+		message(LEAVING, carnumber, cardirection, N);
+		square2->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareNE, lock_NE);
+		lock_release(lock_NE);
+	}
+
+	else if (cardirection == W){
+		//message(APPROACHING, carnumber, cardirection, S);
+		while (square3->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareSW, lock_SW);		
+		}
+	
+		lock_acquire(lock_SW);
+
+		square3->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, S);
+		appW->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_W, approach_W);
+		lock_release(approach_W);
+		message(LEAVING, carnumber, cardirection, S);
+		square3->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSW, lock_SW);
+		lock_release(lock_SW);
+	}
+	
+	else if (cardirection == S){
+		//message(APPROACHING, carnumber, cardirection, E);
+		while (square4->islocked==SQUARELOCKED) {
+			cv_wait(cvsquareSE, lock_SE);		
+		}
+
+		lock_acquire(lock_SE);
+
+		square4->islocked = SQUARELOCKED;
+		message(REGION1, carnumber, cardirection, E);
+		appS->islocked = SQUAREUNLOCKED;
+		cv_signal(cvapproach_S, approach_S);
+		lock_release(approach_S);
+		message(LEAVING, carnumber, cardirection, E);
+		square4->islocked = SQUAREUNLOCKED;
+		cv_signal(cvsquareSE, lock_SE);
+		lock_release(lock_SE);
+	}
+
+	
+        /*
+         * Avoid unused variable warnings.
+         */
+
+        (void) cardirection;
+        (void) carnumber;
+}
+
+
+/*
+ * approachintersection()
+ *
+ * Arguments: 
+ *      void * unusedpointer: currently unused.
+ *      unsigned long carnumber: holds car id number.
+ *
+ * Returns:
+ *      nothing.
+ *
+ * Notes:
+ *      Change this function as necessary to implement your solution. These
+ *      threads are created by createcars().  Each one must choose a direction
+ *      randomly, approach the intersection, choose a turn randomly, and then
+ *      complete that turn.  The code to choose a direction randomly is
+ *      provided, the rest is left to you to implement.  Making a turn
+ *      or going straight should be done by calling one of the functions
+ *      above.
+ */
+ 
+static
+void
+approachintersection(void * unusedpointer,
+                     unsigned long carnumber)
+{
+        int cardirection;
+	int turn_direction;
+
+        /*
+         * Avoid unused variable and function warnings.
+         */
+
+        (void) unusedpointer;
+        (void) carnumber;
+	(void) gostraight;
+	(void) turnleft;
+	(void) turnright;
+
+
+        /*
+         * cardirection is set randomly.
+         */
+
+        cardirection = random() % 4; //can approach from N(0), E(1), S(2), W(3)
+       //cardirection = 1;
+	turn_direction = random() % 3; //can either go straight (0), left(1), right(2) 
+	//turn_direction = 1;
+
+	
+
+	if (cardirection == N){	
+		if(turn_direction == 0) message(APPROACHING, carnumber, cardirection, S);
+		else if(turn_direction == 1) message(APPROACHING, carnumber, cardirection, E);
+		else if(turn_direction == 2) message(APPROACHING, carnumber, cardirection, W);
+		while (appN->islocked==SQUARELOCKED) {
+			kprintf("\ncar %lu is waiting on approach_N\n", carnumber);
+			cv_wait(cvapproach_N, approach_N);
+		}
+		lock_acquire(approach_N);
+		appN->islocked = SQUARELOCKED;
+	}
+	else if (cardirection == E){
+		if(turn_direction == 0) message(APPROACHING, carnumber, cardirection, W);
+		else if(turn_direction == 1) message(APPROACHING, carnumber, cardirection, S);
+		else if(turn_direction == 2) message(APPROACHING, carnumber, cardirection, N);
+		while (appE->islocked==SQUARELOCKED) {
+			kprintf("\ncar %lu is waiting on approach_E\n", carnumber);
+			cv_wait(cvapproach_E, approach_E);
+		}
+		lock_acquire(approach_E);
+		appE->islocked = SQUARELOCKED;
+	}
+	else if (cardirection == W){
+		if(turn_direction == 0) message(APPROACHING, carnumber, cardirection, E);
+		else if(turn_direction == 1) message(APPROACHING, carnumber, cardirection, N);
+		else if(turn_direction == 2) message(APPROACHING, carnumber, cardirection, S);
+		while (appW->islocked==SQUARELOCKED) {
+			cv_wait(cvapproach_W, approach_W);
+		}
+		lock_acquire(approach_W);
+		appW->islocked = SQUARELOCKED;
+	}
+	else if (cardirection == S){
+		if(turn_direction == 0) message(APPROACHING, carnumber, cardirection, N);
+		else if(turn_direction == 1) message(APPROACHING, carnumber, cardirection, W);
+		else if(turn_direction == 2) message(APPROACHING, carnumber, cardirection, E);
+		while (appS->islocked==SQUARELOCKED) {
+			cv_wait(cvapproach_S, approach_S);
+		}
+		lock_acquire(approach_S);
+		appS->islocked = SQUARELOCKED;
+	}
+
+
+
+	if (turn_direction == 0)
+		gostraight(cardirection,carnumber);//go straight from direction cardirection
+	if (turn_direction == 1)
+		turnleft(cardirection, carnumber);//turn left from direction cardirection
+	if (turn_direction ==2)
+		turnright(cardirection, carnumber);//turn right from direction cardirection with carnumber
+
+	V(tsem);
+
+}
+
+/*
+ * createcars()
+ *
+ * Arguments:
+ *      int nargs: unused.
+ *      char ** args: unused.
+ *
+ * Returns:
+ *      0 on success.
+ *
+ * Notes:
+ *      Driver code to start up the approachintersection() threads.  You are
+ *      free to modiy this code as necessary for your solution.
+ */
+
+int
+createcars(int nargs,
+           char ** args)
+{
+        int index, error;
+
+        /*
+         * Avoid unused variable warnings.
+         */
+
+        (void) nargs;
+        (void) args;
+
+	square1 = directionsquare_create(1);
+	square2 = directionsquare_create(2);
+	square3 = directionsquare_create(3);
+	square4 = directionsquare_create(4);
+
+	appN = directionsquare_create(1);
+	appE = directionsquare_create(2);
+	appS = directionsquare_create(3);
+	appW = directionsquare_create(4);
+
+	cvapproach_N = cv_create("approach_N");
+	cvapproach_E = cv_create("approach_E");
+	cvapproach_W = cv_create("approach_W");
+	cvapproach_S = cv_create("approach_S");
+
+	cvsquareNW= cv_create("cvsquareNW");
+	cvsquareNE = cv_create("cvsquareNE");
+	cvsquareSW = cv_create("cvsquareSW");
+	cvsquareSE = cv_create("cvsquareSE");
+
+	lock_NW = lock_create("lock_NW");
+	lock_NE = lock_create("lock_NE");
+	lock_SW = lock_create("lock_SW");
+	lock_SE = lock_create("lock_SE");
+
+	approach_N = lock_create("Approach N");
+	approach_E = lock_create("Approach E");
+	approach_W = lock_create("Approach W");
+	approach_S = lock_create("Approach S");
+
+        /*
+         * Start NCARS approachintersection() threads.
+         */
+	
+	int i = 0;
+
+	if (tsem==NULL) {
+		tsem = sem_create("tsem", 0);
+		if (tsem == NULL) {
+			panic("threadtest: sem_create failed\n");
+		}
+	}
+
+
+        for (index = 0; index < NCARS; index++) {
+
+                error = thread_fork("approachintersection thread",
+                                    NULL,
+                                    index,
+                                    approachintersection,
+                                    NULL
+                                    );
+
+                /*
+                 * panic() on error.
+                 */
+
+                if (error) {
+                        
+                        panic("approachintersection: thread_fork failed: %s\n",
+                              strerror(error)
+                              );
+                }
+        }
+
+	for (i=0; i<NCARS; i++) {
+		P(tsem);
+	}
+
+        return 0;
+}

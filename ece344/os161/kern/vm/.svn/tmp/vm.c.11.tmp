@@ -1,0 +1,1128 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <thread.h>
+#include <curthread.h>
+#include <addrspace.h>
+#include <vm.h>
+#include <machine/spl.h>
+#include <machine/tlb.h>
+#include <bitmap.h>
+#include <vnode.h>
+#include <uio.h>
+#include <elf.h>
+#include <vfs.h>
+#include <kern/unistd.h>
+#include <kern/stat.h>
+
+#define SWAP_DEVICE "lhd0raw:"
+#define SWAP_PT 0x00000001
+#define CORE_PT 0xfffffffe
+#define LOCK_BIT 0x01
+#define UNLOCK_BIT 0x00
+
+static struct vnode *swap_vnode;
+static int ref;
+static int read=0;
+struct lock *paginglock;
+
+
+void
+vm_bootstrap(void)
+{
+	paginglock = lock_create("paginglock");
+	swap_init();
+	coremap_init();
+
+}
+void
+swap_init(void) {
+	kprintf("Swap:\n\tInitializing...\n");
+	u_int32_t retval;
+	retval = vfs_open(SWAP_DEVICE, O_RDWR, &swap_vnode);
+	if (retval) {
+	    panic("couldn't open swap device\n");
+	}
+	
+	struct stat temp;
+	VOP_STAT(swap_vnode, &temp);
+	swap_bmp = bitmap_create(temp.st_size/PAGE_SIZE); // a.st_size is the number of pages we are allowed to create.
+	if (!swap_bmp)
+    		panic("couldn't create swap_bmp\n");
+
+	kprintf("\tSwap Handler occupies: %d.\n", (temp.st_size/PAGE_SIZE));
+	swap_holder = kmalloc((temp.st_size/PAGE_SIZE) * sizeof(struct page_table_entry));
+	firstaddr = ram_stealmem(0);
+	int i;
+	for(i = 0; i < temp.st_size/PAGE_SIZE; i++) {
+		swap_holder[i].pa = (firstaddr + (i * PAGE_SIZE));
+	}
+	kprintf("\tComplete.\n");
+}
+
+void
+coremap_init(void)
+{
+	kprintf("Coremap:\n\tInitializing...\n");
+	if_setupcomplete=0;
+
+	//ram_getsize(&firstaddr, &lastaddr);
+	// Because it is messing up our values for firstaddr and lastaddr in physical memory
+	// We will alternate and use ram_getsize(0) for start and mips_ramsize for end
+	firstaddr = ram_stealmem(0);
+	lastaddr = mips_ramsize();
+
+	max_page_num = ( lastaddr - (firstaddr + 3*PAGE_SIZE) ) / PAGE_SIZE; //Excluding preused memory
+	gbl_bmp = bitmap_create(max_page_num);
+	assert(gbl_bmp != NULL);//ERROR ENOMEM
+
+	freeaddr = firstaddr + 3*PAGE_SIZE;
+	coremap = kmalloc(max_page_num * sizeof(struct page_table_entry));
+	kprintf("\tCoremap Occupies: %d\n", max_page_num * sizeof(struct page_table_entry));
+	kprintf("\tCreating pages: %d.\n", max_page_num);
+
+	assert(coremap != NULL);//ERROR ENOMEM, DEALLOCATE GBL_BMP	
+
+
+	int i;
+	for (i = 3; i < max_page_num; i++) {
+		coremap[i].pa = freeaddr + (i * PAGE_SIZE);
+		coremap[i].valid = 0;
+		coremap[i].dirty = 0;
+		coremap[i].locked = 0;
+		coremap[i].writeable = 0;
+	}
+	bitmap_mark(gbl_bmp, 0); // Setting the first bit to valid to keep our page tables in tact.
+	bitmap_mark(gbl_bmp, 1);	
+	bitmap_mark(gbl_bmp, 2);
+
+	mem_start = freeaddr; // or firstaddr
+	if_setupcomplete=1; //Initilaztion of memory is complete
+
+	kprintf("\tComplete.\n");
+
+}
+
+u_int32_t get_singlepage (u_int32_t *index) {
+	int spl = splhigh(); //probably should use a lock
+	int result;
+	result = bitmap_alloc(gbl_bmp, index); // Set 1 bit and label it set. And tell us where it is
+	//if result returns success then we have one empty page
+	//else we need to swap. For now assume we filled the hole.
+	
+	splx(spl);
+	if (!result){
+		coremap[*index].addr = curthread->t_vmspace;
+		coremap[*index].time = ref;
+		ref++;
+		return coremap[*index].pa;
+	} else
+		return 0;
+}	
+
+u_int32_t pt_insert (u_int32_t vaddr, u_int32_t paddr) {
+	int spl=splhigh();
+	//paddr = paddr & PAGE_FRAME;
+	int index = (paddr - mem_start) / PAGE_SIZE; // Gives the index of the page table
+
+	coremap[index].va = vaddr; //Sets the virtual address of the page table to the virtual address required
+	coremap[index].pa = paddr;
+	coremap[index].valid = 1;
+	coremap[index].time = ref;
+	coremap[index].addr = curthread->t_vmspace;
+	ref++;
+ 
+	if(!bitmap_isset(gbl_bmp, index))
+		bitmap_mark(gbl_bmp, index);
+	splx(spl);
+	return 0;
+}
+
+static
+paddr_t
+getppages(unsigned long npages)
+{
+	assert (npages > 0);
+	int spl = splhigh(); //probably should use a lock
+
+	int i, count;
+	u_int32_t index, paddr;
+
+	//While setting up, program is allowed to ram_steal pages without worrying	` about coremap
+	if (if_setupcomplete == 0){
+		paddr = ram_stealmem(npages);
+		splx(spl);
+		return paddr & PAGE_FRAME;
+	}
+	// coremap has now been initialized.
+	else {
+		// If you only want one page then call the predefined bitmap_alloc function
+		if (npages == 1){
+			paddr = get_singlepage(&index); // Set 1 bit and label it set. And tell us where it is
+			coremap[index].npages=npages;
+			//corempa[index].pid = curthread->pid;
+			
+			if (paddr == 0){
+				splx(spl);
+				return 0;
+			}
+			//assert(coremap[index].valid == 0);
+			//Do work to allocate this page.
+			//coremap[index].valid = 1;
+			//paddr = SET_VALID(paddr);
+			pt_insert( PADDR_TO_KVADDR(paddr), paddr);
+
+			splx(spl);
+			return (paddr & PAGE_FRAME);
+		}
+		//We need more than one page, search the bitmap list for free spaces
+		else {
+			for (i = 0; i < max_page_num; i++){
+				if (bitmap_isset(gbl_bmp, i)){ // if the page is occupied returns 1 so count is still 0 
+					count = 0;
+				} else {
+					count ++; // we found a page YAYAYAY! 
+					if ((unsigned long)count == npages) // have we found enough pages??? 
+						break;
+				}
+			}
+			
+			//Make sure you found a hole. If not you need to swap
+			if (count != npages){
+				kprintf("Not enough pages available in coremap - need to swap\n");
+				splx(spl);
+				return 0;
+			}
+
+
+			//Move back count from i to get the start index.
+			//Set these bits to 1
+			else {
+				index = i  + 1 - count; // start of the contiguos pages is index!
+				for(i = 0; i < count; i++){
+					bitmap_mark(gbl_bmp, index+i);
+					paddr = coremap[index+i].pa;
+					//paddr = SET_VALID(paddr);
+					pt_insert( PADDR_TO_KVADDR(paddr), paddr);
+				}
+				paddr = coremap[index].pa;
+				coremap[index].npages = npages;
+			}
+			splx(spl);
+			return paddr & PAGE_FRAME;	
+		}
+	}
+						
+}
+
+u_int32_t coremap_remove (u_int32_t paddr, int index) {
+	if (index>max_page_num) return 0;
+	paddr = paddr & PAGE_FRAME;
+	assert( (coremap[index].pa & PAGE_FRAME) == (paddr & PAGE_FRAME) );
+	coremap[ index ].va = 0;
+	coremap[ index ].valid = 0;
+	coremap[ index ].npages = 0;
+	coremap[ index ].pa = paddr & PAGE_FRAME;
+
+	if(bitmap_isset(gbl_bmp, index))
+		bitmap_unmark(gbl_bmp, index);	
+	return 0;
+}
+/*
+* 	Things to be done for swapping:
+*		1. Look through page table. if entry exists check if the swap bit is set. If not just read in as normal.
+*			a. If it is set we need to evict a page.
+*		2. Select a page based on some algorithm. Put into swap.
+*			a. check through coremap and find one that is not valid.
+*			b. must Remove it from the TLB, remove from coremap, remove from Page-tables, save into memory.
+*		3. Create new page and let it sit where we evicted the old one.
+*		4. bring the page back into memory and resume.
+*/
+
+int find_fifo (void){
+	int i = 0, index_lowest = 3;
+	u_int32_t secs = 0xffffffff, toptenold, btmtenold;
+	
+	for (i = 3; i < max_page_num; i ++){
+		toptenold = 0;
+		btmtenold = 0;
+		if (coremap[i].time <= secs && coremap[i].addr != NULL && coremap[i].locked != LOCK_BIT){
+			vaddr_t new_va = coremap[i].va;
+			toptenold = new_va >>22;
+			btmtenold = new_va & 0x3FFFFF;
+			btmtenold = btmtenold >> 12;
+			if (coremap[i].addr->firstpt[toptenold] != NULL && coremap[i].addr->firstpt[toptenold][btmtenold]!= 0){
+				secs = coremap[i].time;
+				index_lowest = i;
+			}
+		}
+	}
+	return index_lowest;
+}
+
+int swap_handler (int index, vaddr_t vaddr){
+	int spl = splhigh();
+	int result = evict(vaddr);
+	if (result == 0)
+			return 0;
+	if (index != 0){
+		result = swap_in(index, vaddr);
+		if (result == 0)
+			return 0;
+	}
+	return 1;
+		// grab a page
+}
+
+int evict (vaddr_t vaddr) { //vaddr is the virtual address we want to put into the coremap and give a frame
+	struct uio u;
+	int i, swap_index;
+	u_int32_t ehi, elo;
+	//assert (swap_holder[index].va == vaddr)
+	
+	
+	int result = bitmap_alloc(swap_bmp, &swap_index);
+	if (result){
+		kprintf("ran out of memory!\n");
+		return 0;
+	}	
+	int to_swap = find_fifo();
+	u_int32_t toptenold, btmtenold, index;
+	vaddr_t va_toswap = coremap[to_swap].va; //the va to swap out
+	toptenold = va_toswap >>22;
+	btmtenold = va_toswap & 0x3FFFFF;
+	btmtenold = btmtenold >> 12;
+
+	swap_holder[swap_index].va = coremap[to_swap].va;
+	swap_holder[swap_index].npages = coremap[to_swap].npages;
+	swap_holder[swap_index].addr = coremap[to_swap].addr;
+	
+	bitmap_unmark(gbl_bmp, to_swap);
+	assert (bitmap_isset(gbl_bmp, to_swap) == 0);
+	coremap[to_swap].addr->firstpt[toptenold][btmtenold] = swap_index*2 | SWAP_PT; //set as->firstpt[t][b] to show it is swapped out
+	coremap[to_swap].addr = NULL;
+	coremap[to_swap].va = 0;
+	coremap[to_swap].npages = 0;
+	coremap[to_swap].time = 0;
+	coremap[to_swap].valid = 0;
+	
+	mk_kuio(&u, vaddr, PAGE_SIZE, swap_index * PAGE_SIZE, UIO_WRITE);
+	result = VOP_WRITE(swap_vnode, &u);
+
+	for (i=0; i<NUM_TLB; i++) {
+		TLB_Read(&ehi, &elo, i);
+		if ((ehi & TLBHI_VPAGE) == swap_holder[swap_index].va) {
+			TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+			break;
+		}
+	}
+		//kprintf("SWAP OUT: 0x%x %d %d\n",coremap[(paddr-coremap_start)/PAGE_SIZE].vaddr,paddr,offset);
+	//result = coremap_remove(coremap[to_swap].pa, to_swap);
+	return 1;	
+}
+
+int swap_in (vaddr_t vaddr, int swap_index) {
+	struct uio u;
+	int i, index;
+	u_int32_t ehi, elo;	
+	
+	int result = bitmap_alloc(gbl_bmp, &index);
+	if (result){
+		kprintf("Ran out of Memory\n");
+		//evict(vaddr);
+		//result = bitmap_alloc(gbl_bmp, &index);
+		return 0;
+	}	
+	vaddr_t va_toswap = swap_holder[swap_index].va; //the va to swap out
+	u_int32_t toptenold, btmtenold;
+	toptenold = va_toswap >>22;
+	btmtenold = va_toswap & 0x3FFFFF;
+	btmtenold = btmtenold >> 12;
+	swap_holder[swap_index].addr->firstpt[toptenold][btmtenold] = index*2 & CORE_PT;
+	coremap[index].va = swap_holder[swap_index].va;
+	coremap[index].npages = swap_holder[swap_index].npages;
+	coremap[index].time = ref;
+	ref ++;
+	coremap[index].valid = 1;
+
+	bitmap_unmark(swap_bmp, swap_index);
+		
+	mk_kuio(&u, vaddr, PAGE_SIZE, swap_index * PAGE_SIZE, UIO_READ);
+
+	result = VOP_READ(swap_vnode, &u);
+	return 1;	
+}
+
+void 
+free_kpages(vaddr_t addr)
+{
+	int spl=splhigh();
+	//find its index in coremap
+	int i, j;
+ 	for (i = 3; i < max_page_num; i ++){
+		if (coremap[i].va == addr)
+			break;
+	} // i now equals the index of the position in coremap
+	if (coremap[i].va != addr){
+		return;
+	}
+	for (j = 0; j < coremap[i].npages; j++){
+		coremap_remove(coremap[i+j].pa, i+j);
+	}
+
+	splx(spl);
+}
+
+/*
+* 	To avoid Errors
+*/
+#define DUMBVM_STACKPAGES    12
+
+vaddr_t 
+alloc_kpages(int npages)
+{
+	paddr_t pa;
+	pa = getppages(npages);
+	if (pa==0) {
+		return 0;
+	}
+	return PADDR_TO_KVADDR(pa);
+}
+
+
+static
+int
+page_read(struct vnode *v, off_t offset, vaddr_t vaddr, 
+	     size_t memsize, size_t filesize)
+{
+	struct uio u;
+	int result;
+	size_t fillamt;
+
+	if (filesize > memsize) {
+		filesize = memsize;
+	}
+
+	DEBUG(DB_EXEC, "ELF: Loading %lu bytes to 0x%lx\n", 
+	      (unsigned long) filesize, (unsigned long) vaddr);
+/*
+	u.uio_iovec.iov_ubase = (userptr_t)vaddr;
+	u.uio_iovec.iov_len = memsize;   // length of the memory space
+	u.uio_resid = filesize;          // amount to actually read
+	u.uio_offset = offset;
+	u.uio_segflg = is_executable ? UIO_USERISPACE : UIO_USERSPACE;
+	u.uio_rw = UIO_READ;
+	u.uio_space = curthread->t_vmspace;
+*/
+
+
+	mk_kuio(&u, vaddr, memsize, offset, UIO_READ);
+	u.uio_resid = filesize;
+
+	result = VOP_READ(v, &u);
+	if (result) {
+		return result;
+	}
+
+	if (u.uio_resid != 0) {
+		/* short read; problem with executable? */
+		kprintf("ELF: short read on segment - file truncated?\n");
+		return ENOEXEC;
+	}
+
+	/* Fill the rest of the memory space (if any) with zeros */
+	fillamt = memsize - filesize;
+	if (fillamt > 0) {
+		DEBUG(DB_EXEC, "ELF: Zero-filling %lu more bytes\n", 
+		      (unsigned long) fillamt);
+		u.uio_resid += fillamt;
+		result = uiomovezeros(fillamt, &u);
+	}
+	
+	return result;
+}
+
+static
+int
+page_write(struct vnode *v, off_t offset, vaddr_t vaddr, 
+	     size_t memsize, size_t filesize)
+{
+	struct uio u;
+	int result;
+	size_t fillamt;
+
+	if (filesize > memsize) {
+		filesize = memsize;
+	}
+
+	DEBUG(DB_EXEC, "ELF: Loading %lu bytes to 0x%lx\n", 
+	      (unsigned long) filesize, (unsigned long) vaddr);
+/*
+	u.uio_iovec.iov_ubase = (userptr_t)vaddr;
+	u.uio_iovec.iov_len = memsize;   // length of the memory space
+	u.uio_resid = filesize;          // amount to actually read
+	u.uio_offset = offset;
+	u.uio_segflg = is_executable ? UIO_USERISPACE : UIO_USERSPACE;
+	u.uio_rw = UIO_READ;
+	u.uio_space = curthread->t_vmspace;
+*/
+
+
+	mk_kuio(&u, vaddr, memsize, offset, UIO_WRITE);
+	u.uio_resid = filesize;
+
+	result = VOP_WRITE(v, &u);
+	if (result) {
+		return result;
+	}
+
+	if (u.uio_resid != 0) {
+		/* short write; problem with executable? */
+		kprintf("ELF: short write on segment - file truncated?\n");
+		return ENOEXEC;
+	}
+	/*
+	// Fill the rest of the memory space (if any) with zeros 
+	fillamt = memsize - filesize;
+	if (fillamt > 0) {
+		DEBUG(DB_EXEC, "ELF: Zero-filling %lu more bytes\n", 
+		      (unsigned long) fillamt);
+		u.uio_resid += fillamt;
+		result = uiomovezeros(fillamt, &u);
+	}*/
+	
+	return result;
+}
+
+
+
+int
+vm_fault(int faulttype, vaddr_t faultaddress) //TLB holds a limited number of virtual to physical translations. If it cant be translated by the TLB. results in a fault. Also write to read only causes a fault. These faults are caught here
+{
+	vaddr_t vbase1, vtop1, vbase2, vtop2, stackbase, stacktop;
+	paddr_t paddr;
+	int i;
+	u_int32_t ehi, elo;
+	struct addrspace *as;
+	int spl;
+	off_t txtoffset;
+	size_t txtfilesz;
+
+	lock_acquire(paginglock);
+
+	spl = splhigh();
+
+	faultaddress &= PAGE_FRAME;
+		
+
+	TLB_Read(&ehi, &elo, 0);
+	int tlb_pid = (ehi & TLBHI_PID)>>6;
+
+	if(elo != 0 && tlb_pid != curthread -> pid){
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+		}	
+	}
+
+
+	if(faultaddress==1073741824) {
+		return EFAULT;
+	}
+
+	DEBUG(DB_VM, "dumbvm: fault: 0x%x\n", faultaddress);
+
+	switch (faulttype) {
+	    case VM_FAULT_READONLY:
+		/* We always create pages read-write, so we can't get this */
+		panic("dumbvm: got VM_FAULT_READONLY\n");
+	    case VM_FAULT_READ:
+	    case VM_FAULT_WRITE:
+		break;
+	    default:
+		splx(spl);
+		return EINVAL;
+	}
+
+	as = curthread->t_vmspace;
+	if (as == NULL) {
+		/*
+		 * No address space set up. This is probably a kernel
+		 * fault early in boot. Return EFAULT so as to panic
+		 * instead of getting into an infinite faulting loop.
+		 */
+		return EFAULT;
+	}
+
+	if (faultaddress==0) {
+		return EFAULT;
+	}
+
+	if(faultaddress+PAGE_SIZE >= as->as_stackvbase) { //trying to get a stackpage, decrement stackpointer
+		as->as_stackvbase = faultaddress;
+	}
+
+	/* Assert that the address space has been set up properly. */
+	assert(as->as_npages1 != 0);
+	assert(as->as_vbase2 != 0);
+	assert(as->as_npages2 != 0);
+	//assert(as->as_stackpbase != 0);
+	assert((as->as_vbase1 & PAGE_FRAME) == as->as_vbase1);
+	assert((as->as_pbase1 & PAGE_FRAME) == as->as_pbase1);
+	assert((as->as_vbase2 & PAGE_FRAME) == as->as_vbase2);
+	assert((as->as_pbase2 & PAGE_FRAME) == as->as_pbase2);
+	//assert((as->as_stackpbase & PAGE_FRAME) == as->as_stackpbase);
+
+	vbase1 = as->as_vbase1;
+	vtop1 = vbase1 + as->as_npages1 * PAGE_SIZE;
+	vbase2 = as->as_vbase2;
+	vtop2 = vbase2 + as->as_npages2 * PAGE_SIZE;
+
+	stackbase = as->as_stackvbase;
+	stacktop = USERSTACK;
+	
+
+	u_int32_t toptenbits, btmtenbits, index;
+	toptenbits = faultaddress >>22;
+	btmtenbits = faultaddress & 0x3FFFFF;
+	btmtenbits = btmtenbits >> 12;
+
+	if(as->firstpt[toptenbits]==NULL){  //page fault
+		int *secondpt = kmalloc(1024*sizeof(int));
+		as->firstpt[toptenbits] = secondpt;
+	}
+	if (as->firstpt[toptenbits][btmtenbits]%2 == 1) { // Its been swapped out
+		int swp_index = as->firstpt[toptenbits][btmtenbits]/2;
+		int fail = swap_handler(swp_index, faultaddress);
+		if (fail == 0)
+				return ENOMEM;
+	} else if(as->firstpt[toptenbits][btmtenbits]/2==0){//never been mapped
+		paddr_t temp;	
+		temp=get_singlepage (&index);
+		while(temp == 0){ // Didn't get a page because there is no space left
+			int fail = swap_handler(0, faultaddress); //gona have to call swap handler here
+			if (fail == 0)
+				return ENOMEM;
+			temp=get_singlepage (&index);
+		}
+		coremap[index].npages = 1;
+		
+		as->firstpt[toptenbits][btmtenbits] = index * 2;
+		pt_insert (faultaddress, temp);
+		
+	}
+	// else if ((coremap[as->firstpt[toptenbits][btmtenbits]]%2 == 0) // Its in the coremap prob not in TLB
+	//{
+		//just keep going.
+	//}
+	// else error
+
+<<<<<<< .mine
+	if (faultaddress >= vbase1 && faultaddress < vtop1) { // Text //only release the lock once you've read the last page of the text region
+=======
+	if (faultaddress >= vbase1 && faultaddress < vtop1) { // Text
+
+		u_int32_t counter, tmp_flsz, tmp_off;
+		counter=0;
+		while (faultaddress - counter*PAGE_SIZE > vbase1)
+			counter ++;
+		tmp_flsz = as->filesize_text - counter * PAGE_SIZE;
+		tmp_off = as->off_text + counter * PAGE_SIZE;
+		
+		int result = page_read(as->as_vnode, tmp_off, PADDR_TO_KVADDR(coremap[as->firstpt[toptenbits][btmtenbits]/2].pa), 
+		PAGE_SIZE, tmp_flsz);
+		coremap[as->firstpt[toptenbits][btmtenbits]/2].locked = LOCK_BIT;
+		if (result) {
+			return result;
+		}
+		
+>>>>>>> .r156
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Read(&ehi, &elo, i);
+			if (elo & TLBLO_VALID) {
+				continue;
+			}
+			else if(i == 63) {
+				for (i = 0; i < NUM_TLB; i ++) {
+					TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+				}
+				i = 0;
+			}
+		
+			index = as->firstpt[toptenbits][btmtenbits]/2;
+			int pid = curthread->pid *64;
+			ehi = faultaddress | pid;
+			elo = coremap[index].pa | TLBLO_VALID;
+			TLB_Write(ehi, elo, i);
+			splx(spl);
+			lock_release(paginglock);
+			return 0;
+		}
+			
+	}
+	
+	else if(faultaddress >= vbase2 && faultaddress < vtop2) { //Data
+<<<<<<< .mine
+=======
+		
+		u_int32_t counter, tmp_flsz, tmp_off;
+		counter=0;
+		while (faultaddress - counter*PAGE_SIZE > vbase2)
+			counter ++;
+		if (as->filesize_data!= 0) {
+			tmp_flsz = as->filesize_data - counter * PAGE_SIZE;
+			tmp_off = as->off_data + counter * PAGE_SIZE;
+			coremap[as->firstpt[toptenbits][btmtenbits]/2].locked = LOCK_BIT;
+			int result = page_read(as->as_vnode, tmp_off, PADDR_TO_KVADDR(coremap[as->firstpt[toptenbits][btmtenbits]/2].pa),
+						PAGE_SIZE, tmp_flsz);
+			if(result) {
+				return result;
+			}
+		}
+
+>>>>>>> .r156
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Read(&ehi, &elo, i);
+			if (elo & TLBLO_VALID) {
+				continue;
+			}
+		
+			else if(i == 63) {
+				for (i = 0; i < NUM_TLB; i ++) {
+					TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+				}
+				i = 0;
+			}
+			index = as->firstpt[toptenbits][btmtenbits]/2;
+			int pid = curthread->pid *64;
+			ehi = faultaddress | pid;
+			elo = coremap[index].pa | TLBLO_VALID | TLBLO_DIRTY;
+			TLB_Write(ehi, elo, i);
+			splx(spl);
+			lock_release(paginglock);
+			return 0;
+		}
+	}
+	
+	else {
+
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Read(&ehi, &elo, i);
+			if (elo & TLBLO_VALID) {
+				continue;
+			}
+		
+			else if(i == 63) {
+				for (i = 0; i < NUM_TLB; i ++) {
+					TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+				}
+				i = 0;
+			}
+		
+			index = as->firstpt[toptenbits][btmtenbits]/2;
+			int pid = curthread->pid *64;
+			ehi = faultaddress | pid;
+			elo = coremap[index].pa | TLBLO_VALID | TLBLO_DIRTY;
+			TLB_Write(ehi, elo, i);
+			splx(spl);
+			lock_release(paginglock);
+			return 0;
+		}
+	}
+	
+
+	//kprintf("dumbvm: Ran out of TLB entries - cannot handle page fault\n");
+	//splx(spl);
+	//return EFAULT;
+}
+
+struct addrspace *
+as_create(void)
+{
+	struct addrspace *as = kmalloc(sizeof(struct addrspace));
+	if (as==NULL) {
+		return NULL;
+	}
+	
+	as->firstpt = kmalloc(1024*sizeof(int*)); // 2^10 bits
+	if (as->firstpt==NULL) {
+		kfree(as->firstpt);
+		return NULL;
+	}
+	as->as_vnode = NULL;
+	as->as_stackvbase = USERSTACK;
+	as->heaptop = 0;
+	as->heapbottom = 0;
+	as->as_vbase1 = 0;
+	as->as_npages1 = 0;
+	as->as_vbase2 = 0;
+	as->as_npages2 = 0;
+	as->as_pbase1=0;
+	as->as_pbase2=0;
+	as->as_stackpbase=0;
+	
+	return as;
+}
+
+void
+as_destroy(struct addrspace *as)
+{
+	int spl = splhigh();
+
+	VOP_DECREF(as->as_vnode);//text region
+	VOP_DECREF(as->as_vnode);//data region
+
+	int i, j;
+
+	u_int32_t elo, ehi;
+	TLB_Read(&ehi, &elo, 0);
+	int tlb_pid = (ehi & TLBHI_PID)>>6;
+
+	if(elo != 0 && tlb_pid == curthread -> pid){
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+		}	
+	}
+	for(i=1; i < 1024; i++) {
+		if(as->firstpt[i]!=NULL) {//ezzentially there exists a second level page table for this firstpt[i]
+			for(j=0;j<1024;j++) {
+				if (as->firstpt[i][j]/2!=0) { //it is an entry in the coremap
+					coremap_remove (coremap[as->firstpt[i][j]/2].pa, as->firstpt[i][j]/2);
+				}
+				//=0, no entry mapped to this va
+			}
+			kfree(as->firstpt[i]);
+		}//as->firstpt[i] is null so nothing allocated
+	}
+	kfree(as->firstpt);
+
+	//kfree((void *)PADDR_TO_KVADDR(as->addr_coremap));
+
+	kfree(as);
+
+	TLB_Read(&ehi, &elo, 0);
+	tlb_pid = (ehi & TLBHI_PID)>>6;
+
+	if(elo != 0 && tlb_pid == curthread -> pid){
+
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+		}	
+	}
+	
+	splx(spl);
+}
+
+void
+as_activate(struct addrspace *as)
+{ 
+	int i, spl;
+	u_int32_t ehi, elo;
+	spl = splhigh();
+
+	TLB_Read(&ehi, &elo, 0);
+	int tlb_pid = (ehi & TLBHI_PID)>>6;
+	if(elo != 0 && tlb_pid != curthread -> pid){
+		for (i=0; i<NUM_TLB; i++) {
+			TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+		}	
+	}
+	
+	splx(spl);
+}
+
+int
+as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz, size_t filesize,
+		 int readable, int writeable, int executable, struct vnode *v, u_int32_t offset)
+{
+	size_t npages; 
+
+	/* Align the region. First, the base... */
+	sz += vaddr & ~(vaddr_t)PAGE_FRAME;
+	vaddr &= PAGE_FRAME;
+
+	/* ...and now the length. */
+	sz = (sz + PAGE_SIZE - 1) & PAGE_FRAME;
+
+	npages = sz / PAGE_SIZE;
+
+	/* We don't use these - all pages are read-write */
+	//(void)readable;
+	//(void)writeable;
+	//(void)executable;
+	
+	u_int32_t toptenbits, btmtenbits;
+	toptenbits = vaddr >>22;
+	btmtenbits = vaddr & 0x3FFFFF;
+	btmtenbits = btmtenbits >> 12;
+
+
+	if (as->as_vbase1 == 0) {
+		as->as_vbase1 = vaddr;
+		as->readable1 = readable;
+		as->writeable1 = writeable;
+		as->executable1 = executable;
+		as->as_npages1 = npages;
+		as->heapbottom = vaddr + sz;
+		as->heaptop = as->heapbottom;
+
+		as->as_vnode = v;
+		VOP_INCREF(v);
+		as->off_text = offset;
+		as->filesize_text = filesize;
+		
+		//must create second level page table for this new virtual address
+		
+		
+		return 0;
+	}
+
+	if (as->as_vbase2 == 0) {
+		as->as_vbase2 = vaddr;
+		as->as_npages2 = npages;
+		as->heapbottom = vaddr + sz;
+		as->heaptop = as->heapbottom;
+		
+		as->readable2 = readable;
+		as->writeable2 = writeable;
+		as->executable2 = executable;
+		
+		if (as->as_vnode==NULL) as->as_vnode = v;
+		VOP_INCREF(v);		
+		as->off_data = offset;
+		as->filesize_data = filesize;
+		
+		return 0;
+		
+	}
+	kprintf("Warning: too many regions\n");
+	return EUNIMP;
+}
+
+int
+as_prepare_load(struct addrspace *as)
+{
+
+
+u_int32_t i, index;
+
+u_int32_t toptenbits1, btmtenbits1, toptenbits2, btmtenbits2;
+
+	toptenbits1 = as->as_vbase1 >>22;
+	btmtenbits1 = as->as_vbase1 & 0x3FFFFF;
+	btmtenbits1 = btmtenbits1 >> 12;
+
+	int *secondpt = kmalloc(1024*sizeof(int));
+		as->firstpt[toptenbits1] = secondpt;
+	for(i=0;i<as->as_npages1;i++)
+	{		
+		paddr_t temp;	
+		temp=get_singlepage (&index);
+		if(i==0) {
+			coremap[index].npages = as->as_npages1;
+		}
+		as->firstpt[toptenbits1][btmtenbits1+i] = index*2;
+		if(temp == 0)
+			return ENOMEM;
+		pt_insert (as->as_vbase1+i*PAGE_SIZE, temp);
+		if(i==0) as->as_pbase1 = temp;
+		u_int32_t counter, tmp_flsz, tmp_off;
+		counter=0;
+		while (as->as_vbase1+i*PAGE_SIZE - counter*PAGE_SIZE > as->as_vbase1)
+			counter ++;
+		tmp_flsz = as->filesize_text - counter * PAGE_SIZE;
+		tmp_off = as->off_text + counter * PAGE_SIZE;
+		int result = page_read(as->as_vnode, tmp_off, PADDR_TO_KVADDR(temp),
+						PAGE_SIZE, tmp_flsz);
+			if(result) {
+				return result;
+			}
+	}
+
+	toptenbits2 = as->as_vbase2 >>22;
+	btmtenbits2 = as->as_vbase2 & 0x3FFFFF;
+	btmtenbits2 = btmtenbits2 >> 12;
+
+
+	int *secondpt2 = kmalloc(1024*sizeof(int));
+		as->firstpt[toptenbits2] = secondpt2;
+	for(i=0;i<as->as_npages2;i++)
+	{	
+		paddr_t temp;	
+		temp=get_singlepage (&index);	
+		if(i==0) {
+			coremap[index].npages = as->as_npages2;
+		}
+		as->firstpt[toptenbits2][btmtenbits2+i] = index*2;
+		if(temp == 0)
+			return ENOMEM;	
+		pt_insert (as->as_vbase2+i*PAGE_SIZE, temp);	
+		if(i==0) as->as_pbase2 = temp;
+		
+		u_int32_t counter, tmp_flsz, tmp_off;
+		counter=0;
+		while (as->as_vbase2+i*PAGE_SIZE - counter*PAGE_SIZE > as->as_vbase2)
+			counter ++;
+		if (as->filesize_data!= 0) {
+			tmp_flsz = as->filesize_data - counter * PAGE_SIZE;
+			tmp_off = as->off_data + counter * PAGE_SIZE;
+			int result = page_read(as->as_vnode, tmp_off, PADDR_TO_KVADDR(temp),
+						PAGE_SIZE, tmp_flsz);
+			if(result) {
+				return result;
+			}
+		}
+		
+	}
+
+	return 0;
+	
+}
+
+int
+as_complete_load(struct addrspace *as)
+{
+	(void)as;
+	return 0;
+}
+
+int
+as_define_stack(struct addrspace *as, vaddr_t *stackptr)
+{
+	*stackptr = as->as_stackvbase;
+	return 0;
+}
+
+int
+as_copy(struct addrspace *old, struct addrspace **ret)
+{
+	struct addrspace *new;
+	int i, index;
+	paddr_t paddr;
+	u_int32_t toptenbits, btmtenbits, toptenbits1, btmtenbits1, toptenbits2, btmtenbits2;
+	new = as_create();
+	if (new==NULL) {
+		return ENOMEM;
+	}
+	new->heaptop = old->heaptop;
+	new->heapbottom = old ->heapbottom;
+	new->as_stackvbase = old -> as_stackvbase;
+	new->as_vbase1 = old->as_vbase1;
+	new->as_npages1 = old->as_npages1;
+	new->as_vbase2 = old->as_vbase2;
+	new->as_npages2 = old->as_npages2;
+	new->as_vnode = old->as_vnode;
+	VOP_INCREF(new->as_vnode);
+	VOP_INCREF(new->as_vnode);
+	
+	new->off_data = old->off_data;
+	new->off_text = old->off_text; 
+	new->filesize_text = old->filesize_text;
+	new->filesize_data = old->filesize_data;
+
+
+
+
+	if (as_prepare_load(new)) {
+		as_destroy(new);
+		return ENOMEM;
+	}
+	for(i=0;i<old->as_npages1;i++)	{	
+		memmove((void *) (PADDR_TO_KVADDR(coremap[new->firstpt[1][i]/2].pa) ) , (const void *)old->as_vbase1+(i*PAGE_SIZE),PAGE_SIZE);
+	}  	
+	for(i=0;i<old->as_npages2;i++) {		
+		memmove((void *) (PADDR_TO_KVADDR(coremap[new->firstpt[64][i]/2].pa) ), (const void *)old->as_vbase2+(i*PAGE_SIZE),PAGE_SIZE);
+	}
+
+
+
+
+
+	
+	int stackpages = ((USERSTACK)-old->as_stackvbase)/PAGE_SIZE;
+	toptenbits = old->as_stackvbase>>22;
+	new->firstpt[toptenbits] = kmalloc(1024*sizeof(int));
+	for(i = stackpages; i > 0; i--) {
+		paddr = get_singlepage(&index);
+		pt_insert((PADDR_TO_KVADDR(paddr)), paddr);
+		vaddr_t currva = USERSTACK-(i*PAGE_SIZE);
+		toptenbits = currva >>22;
+		btmtenbits = currva & 0x3FFFFF;
+		btmtenbits = btmtenbits >> 12;
+		new->firstpt[toptenbits][btmtenbits] = index*2;
+		memmove((void *) (PADDR_TO_KVADDR(paddr) ), (const void *)USERSTACK-(i*PAGE_SIZE),PAGE_SIZE);	
+		
+		
+		
+	}
+	
+	
+	for(;new->heapbottom < old->heaptop;new->heaptop+=PAGE_SIZE) {
+		paddr = get_singlepage(&index);
+		pt_insert((PADDR_TO_KVADDR(paddr)), paddr);
+      		memcpy((void *) (PADDR_TO_KVADDR(paddr)), (const void *)new->heaptop,PAGE_SIZE);
+    	}
+	
+
+
+	*ret = new;
+	return 0;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+
+
+	new->firstpt[1] = kmalloc(1024*sizeof(int));
+	for(i=0;i<old->as_npages1;i++)	{	
+		paddr = get_singlepage(&index);
+		pt_insert((PADDR_TO_KVADDR(paddr)), paddr);
+		new->firstpt[1][i] = index*2;		
+		memcpy((void *) (PADDR_TO_KVADDR(paddr) ) , (const void *)old->as_vbase1+(i*PAGE_SIZE),PAGE_SIZE);
+		
+	}  	
+
+	
+	new->firstpt[64] = kmalloc(1024*sizeof(int));
+	for(i=0;i<old->as_npages2;i++)
+	{		
+		paddr = get_singlepage(&index);
+		pt_insert((PADDR_TO_KVADDR(paddr)), paddr);
+		new->firstpt[64][i] = index*2;
+		memcpy((void *) (PADDR_TO_KVADDR(paddr) ) , (const void *)old->as_vbase2+(i*PAGE_SIZE),PAGE_SIZE);
+		
+	}*/

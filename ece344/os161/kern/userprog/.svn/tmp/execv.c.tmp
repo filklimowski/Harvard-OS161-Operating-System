@@ -1,0 +1,159 @@
+/*
+ * Sample/test code for running a user program.  You can use this for
+ * reference when implementing the execv() system call. Remember though
+ * that execv() needs to do more than this function does.
+ */
+
+#include <types.h>
+#include <kern/unistd.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <addrspace.h>
+#include <thread.h>
+#include <curthread.h>
+#include <vm.h>
+#include <vfs.h>
+#include <test.h>
+#include <syscall.h>
+#include <machine/spl.h>
+#include <trapframe.h>
+#include <synch.h>
+#include <scheduler.h>
+#include <dev.h>
+#include <syscall.h>
+#include <version.h>
+#include <thread.h>
+
+/*
+ * Load program "progname" and start running it in usermode.
+ * Does not return except on error.
+ *
+ * Calls vfs_open on progname and thus may destroy it.
+ */
+int
+sys_execv(const char *program, char **args)
+{
+	
+	//find out how many arguments we have
+	int i, numargs, numchars;
+	int actual;
+	char **arguments;
+	int total_data;
+
+	numchars = 0;
+
+	for(numargs=0;args[numargs]!=NULL;numargs++); //numargs=3
+
+	arguments = kmalloc(numargs*sizeof(char*));
+	for(i=0;i<numargs;i++)
+		arguments[i]=kmalloc(strlen(args[i])*sizeof(char));
+
+	for(i=0;i<numargs;i++) {
+		copyinstr(args[i], arguments[i], strlen(args[i]), &actual);
+<<<<<<< .mine
+		kprintf("%d is strlen, %d is actual\n", strlen(args[i]), actual);
+=======
+		//numchars += strlen(arguments[i]);
+>>>>>>> .r103
+	}
+
+	for(i=0;i<numargs;i++) {
+		if(strlen(arguments[i]) > strlen(args[i]))
+			arguments[i][strlen(args[i])] = '\0';
+		numchars += strlen(arguments[i]) + (16 - strlen(arguments[i])%16);
+	}
+<<<<<<< .mine
+
+
+	//kargv[0] = 4*(numargs+1); //16
+	//kargv[numargs] = NULL;
+	//set kargv[0] to numargs
+	
+=======
+>>>>>>> .r103
+
+
+	struct addrspace *old_as = NULL;
+
+	as_copy(curthread->t_vmspace, &old_as); //make copy of old as in case of error	
+
+	as_destroy(curthread->t_vmspace);
+	curthread->t_vmspace = NULL;
+
+
+	struct vnode *v;
+	vaddr_t entrypoint, stackptr;
+	int result;
+
+	/* Open the file. */
+	result = vfs_open(arguments[0], O_RDONLY, &v);
+	if (result) {
+		return result;
+	}
+
+	/* We should be a new thread. */
+	assert(curthread->t_vmspace == NULL);
+
+	///* Create a new address space. */
+	curthread->t_vmspace = as_create();
+	if (curthread->t_vmspace==NULL) {
+		vfs_close(v);
+		return ENOMEM;
+	}
+
+	/* Activate it. */
+	as_activate(curthread->t_vmspace);
+
+	/* Load the executable. */
+	result = load_elf(v, &entrypoint);
+	if (result) {
+		/* thread_exit destroys curthread->t_vmspace */
+		vfs_close(v);
+		return result;
+	}
+
+	/* Done with the file now. */
+	vfs_close(v);
+
+	/* Define the user stack in the address space */
+	result = as_define_stack(curthread->t_vmspace, &stackptr);
+
+	//stackptr = 
+	if (result) {
+		/* thread_exit destroys curthread->t_vmspace */
+		return result;
+	}
+	
+	total_data = numargs*sizeof(char*) + numchars + sizeof(int);
+	stackptr -= total_data;
+	int temp_stptr = stackptr;
+
+<<<<<<< .mine
+	//for(i=0;i<numargs;i++) {
+		
+
+=======
+	temp_stptr += sizeof(int);
+	copyout(numargs, temp_stptr, sizeof(int));
+
+	for (i = 0; i < numargs; i ++){
+		temp_stptr += sizeof(char*);
+		copyout(&arguments[i], temp_stptr, sizeof(char*));
+	}
+	for (i = 0; i < numargs; i ++){
+		temp_stptr += strlen(arguments[i]) + (16 - strlen(arguments[i])%16);
+		copyoutstr(arguments[i], temp_stptr, strlen(arguments[i]) + (16 - strlen(arguments[i])%16), actual);
+	}
+
+	//args = arguments;
+
+>>>>>>> .r103
+	/* Warp to user mode. */
+	md_usermode(numargs /*argc*/, stackptr /*userspace addr of argv*/,
+		    stackptr, entrypoint);
+	
+	/* md_usermode does not return */
+	panic("md_usermode returned\n");
+	return EINVAL;
+}
+

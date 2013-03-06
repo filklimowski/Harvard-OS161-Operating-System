@@ -1,0 +1,101 @@
+10
+
+dir
+156
+svn+ssh://ug131.eecg.utoronto.ca/svn/os-001/svn/trunk/bin
+svn+ssh://ug131.eecg.utoronto.ca/svn/os-001/svn
+
+
+
+2012-10-18T14:43:17.801279Z
+60
+klimowsk
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+30b6d168-ecae-4135-bb15-337a6cddedb7
+
+true
+dir
+
+cp
+dir
+
+mv
+dir
+
+mkdir
+dir
+
+cat
+dir
+
+ln
+dir
+
+false
+dir
+
+pwd
+dir
+
+sh
+dir
+
+sync
+dir
+
+rmdir
+dir
+
+Makefile
+file
+
+
+
+
+2012-10-14T19:04:35.269180Z
+dca1c0e2cb1dbc80526c5dd8608c63be
+2012-09-20T14:22:56.277427Z
+2
+difelice
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+522
+
+ls
+dir
+
+rm
+dir
+
