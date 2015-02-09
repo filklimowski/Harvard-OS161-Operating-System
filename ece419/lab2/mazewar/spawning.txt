@@ -1,0 +1,10 @@
+
+when server reads that it's a SPAWN,
+broadcast it.
+send COORDINATE_REQ to all clients
+clients respond with COORDINATES packet.
+server builds an array with [player id, x, y, d]
+once the # of coordinate packets server has received = clientList.size()
+send a CLIENT_LIST packet with the array [player id, x, y, d]
+client receives client_list and if its not your player id, add those clients
+
